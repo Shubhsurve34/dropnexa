@@ -1,9 +1,9 @@
-
 import { NextRequest, NextResponse } from "next/server";
 import {
   FieldValue,
   Timestamp,
 } from "firebase-admin/firestore";
+import argon2 from "argon2";
 
 import { adminAuth, adminDb } from "@/lib/firebase-admin";
 
@@ -14,6 +14,10 @@ type CreateDropBody = {
   content: string;
   expiry: string;
   customExpiry?: string;
+  password?: string;
+  limitEnabled?: boolean;
+  downloadLimit?: number;
+  oneTime?: boolean;
 };
 
 function getExpiryDate(
@@ -79,8 +83,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. Read and validate the request body.
-    const body = (await request.json()) as CreateDropBody;
+    // 2. Read request body.
+    let body: CreateDropBody;
+
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { success: false, message: "Invalid request body." },
+        { status: 400 }
+      );
+    }
 
     if (!body || !["text", "link"].includes(body.type)) {
       return NextResponse.json(
@@ -89,7 +102,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (typeof body.content !== "string" || !body.content.trim()) {
+    if (
+      typeof body.content !== "string" ||
+      !body.content.trim()
+    ) {
       return NextResponse.json(
         { success: false, message: "Drop content is required." },
         { status: 400 }
@@ -100,7 +116,10 @@ export async function POST(request: NextRequest) {
 
     if (body.type === "text" && content.length > 100000) {
       return NextResponse.json(
-        { success: false, message: "Text exceeds the 100,000 character limit." },
+        {
+          success: false,
+          message: "Text exceeds the 100,000 character limit.",
+        },
         { status: 400 }
       );
     }
@@ -114,13 +133,85 @@ export async function POST(request: NextRequest) {
         }
       } catch {
         return NextResponse.json(
-          { success: false, message: "Please provide a valid HTTP or HTTPS URL." },
+          {
+            success: false,
+            message: "Please provide a valid HTTP or HTTPS URL.",
+          },
           { status: 400 }
         );
       }
     }
 
-    // 3. Calculate expiry.
+    // 3. Validate password.
+    let passwordHash: string | null = null;
+
+    if (body.password !== undefined) {
+      if (
+        typeof body.password !== "string" ||
+        body.password.length < 6 ||
+        body.password.length > 128
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Password must contain between 6 and 128 characters.",
+          },
+          { status: 400 }
+        );
+      }
+
+      passwordHash = await argon2.hash(body.password, {
+        type: argon2.argon2id,
+      });
+    }
+
+    // 4. Validate access settings.
+    if (
+      body.limitEnabled !== undefined &&
+      typeof body.limitEnabled !== "boolean"
+    ) {
+      return NextResponse.json(
+        { success: false, message: "Invalid download limit setting." },
+        { status: 400 }
+      );
+    }
+
+    if (
+      body.oneTime !== undefined &&
+      typeof body.oneTime !== "boolean"
+    ) {
+      return NextResponse.json(
+        { success: false, message: "Invalid one-time access setting." },
+        { status: 400 }
+      );
+    }
+
+    const limitEnabled = body.limitEnabled === true;
+    const oneTimeAccess = body.oneTime === true;
+
+    let maxAccesses: number | null = null;
+
+    if (oneTimeAccess) {
+      maxAccesses = 1;
+    } else if (limitEnabled) {
+      if (
+        !Number.isInteger(body.downloadLimit) ||
+        body.downloadLimit! < 1 ||
+        body.downloadLimit! > 1000
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Download limit must be between 1 and 1000.",
+          },
+          { status: 400 }
+        );
+      }
+
+      maxAccesses = body.downloadLimit!;
+    }
+
+    // 5. Calculate expiry.
     if (typeof body.expiry !== "string") {
       return NextResponse.json(
         { success: false, message: "Expiry setting is required." },
@@ -140,20 +231,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 4. Create the drop record.
+    // 6. Create Firestore record.
     const dropRef = adminDb.collection("drops").doc();
 
     await dropRef.set({
       ownerId: decodedToken.uid,
       type: body.type,
       content,
+
       createdAt: FieldValue.serverTimestamp(),
       expiresAt: Timestamp.fromDate(expiresAt),
+
       downloadCount: 0,
+      maxAccesses,
+      oneTimeAccess,
+
       status: "active",
+
+      passwordProtected: passwordHash !== null,
+      ...(passwordHash ? { passwordHash } : {}),
     });
 
-    // 5. Return the generated drop details.
+    // 7. Return drop details.
     return NextResponse.json(
       {
         success: true,
@@ -162,6 +261,9 @@ export async function POST(request: NextRequest) {
           id: dropRef.id,
           type: body.type,
           expiresAt: expiresAt.toISOString(),
+          passwordProtected: passwordHash !== null,
+          maxAccesses,
+          oneTimeAccess,
           shareUrl: `${request.nextUrl.origin}/d/${dropRef.id}`,
         },
       },

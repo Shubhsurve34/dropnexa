@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState } from "react";
@@ -130,6 +129,10 @@ export default function Home() {
                 : linkContent.trim(),
             expiry,
             ...(expiry === "Custom" ? { customExpiry } : {}),
+            ...(passwordEnabled ? { password } : {}),
+            limitEnabled,
+downloadLimit: Number(downloadLimit),
+oneTime,
           }),
         });
 
@@ -141,7 +144,7 @@ export default function Home() {
 
         setCreatedLink(data.drop.shareUrl);
         setNotice(
-          `${toolNames[activeTool]} saved successfully in Firestore. Public sharing will be enabled after the retrieval endpoint is built.`
+          `${toolNames[activeTool]} saved successfully. Your share link is ready.`
         );
 
         return;
